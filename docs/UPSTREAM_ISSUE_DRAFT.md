@@ -1,117 +1,330 @@
 # 上游 Issue 草稿 — Suggestion 模板
 
-仓库：Minecraft-Transit-Railway/Minecraft-Transit-Railway
-模板：Suggestion (`.github/ISSUE_TEMPLATE/suggestion.yaml`)
-标题：`Signal desk and interlocking system with manual route setting`
+- 仓库：`Minecraft-Transit-Railway/Minecraft-Transit-Railway`
+- 模板：Suggestion（`.github/ISSUE_TEMPLATE/suggestion.yaml`）
+- 标题建议：**信号桌与联锁系统：支持手动排进路（Signal desk and interlocking system with manual route setting）**
+- 状态：**尚未提交**
+
+> 备注：本草稿为中文版。上游为英文项目，如需提高被采纳的机会，
+> 可另附一份英文版并排放置（中文在上、英文在下），需要时随时可以生成。
 
 ---
 
 ## 字段 1 — Suggestion Type（下拉框）
 
-选择：**Train simulation mechanics**
+选择：**Train simulation mechanics**（列车模拟机制）
 
 ---
 
-## 字段 2 — Suggestion
+## 字段 2 — Suggestion（建议内容）
 
-Right now signals in MTR work as automatic block signals: a train reserves the coloured rail
-spans ahead of it, and the aspect shown is a consequence of occupancy. There is no way for a
-player to act as a signaller — to decide which way a train goes through a junction, to hold a
-train at a signal, or to give one train priority over another.
+### 现状与缺口
 
-I would like to suggest a **signal desk** and a **server-side interlocking system**, so that
-junctions can be worked by hand the way a real signalling control centre works.
+目前 MTR 的信号是**全自动闭塞（automatic block signalling）**：
+列车预约前方的信号色区段，信号机显示的灯色只是占用状态的**结果**。
+这套机制跑单线、跑环线都没问题，但它带来一个缺口 —— **玩家无法扮演信号员（signaller）**：
 
-Two new pieces of content:
+- 无法决定一列车通过分歧点时走哪一条路
+- 无法把一列车扣停在信号机前
+- 无法在两列车之间分配优先级
+- 车站咽喉区（station throat）是"自己解决"的，没有人在操作它
 
-**1. Signal Dashboard** — a handheld, OP-gated item for administration. It defines *signal
-desks*: each desk gets a control area, a list of signals and sets of points it is authorised to
-operate, and a per-desk player allow/block list. This lets a server owner split a large network
-into control areas and hand each one to a different player, without giving anyone the ability to
-touch the whole map.
+换句话说，现在多人服务器上的 MTR 有**司机**和**建筑师**，但没有**信号员**。
+本提案想补上这个角色。
 
-**2. Signal Desk** — a block you sit at. Sitting down opens a control screen showing a schematic
-track diagram of the desk's area, with live track occupancy, signal aspects and point positions.
-Routes are set with the standard **entrance–exit (NX)** method used by real signalling
-workstations:
+### 提案概要
 
-| Input | Action |
+新增两样内容，以及一套服务端联锁引擎。
+
+#### 一、信号仪表板（Signal Dashboard）—— 手持物品，仅 OP 可用
+
+管理用工具，负责**划分管辖权**。功能：
+
+| 功能 | 说明 |
 |---|---|
-| Click the entrance signal, then the exit signal | Set the route; points move and lock automatically |
-| Right-click the entrance signal | Cancel the route; the signal returns to danger |
-| Click a set of points | Move them individually (refused while locked by a route) |
+| 新建 / 删除 / 重命名信号桌 | 一台服务器可以有任意多个信号桌 |
+| 划定控制区域 | 在地图控件上拖拽出一个长方体区域 |
+| 指定可控信号机 | 勾选区域内的信号机，决定这个桌子**能不能**操作它 |
+| 指定可控道岔 | 同上，逐组道岔授权 |
+| **黑白名单** | 设定**哪些玩家**可以使用这个桌子 |
+| 停车防护模式 | 决定列车被拦停在哪个位置（见下文） |
 
-The interlocking runs on the server and refuses any route that conflicts with another, is already
-occupied, or needs points that are locked. If a route is set the wrong way for a train, the train
-is held at the protecting signal until the signaller corrects it — which is the whole point of the
-feature, and something that is currently impossible to build in MTR.
+黑白名单的设计：
 
-This would give players a completely new role to play on a server. Today a multiplayer MTR network
-has drivers and builders; this adds **signallers**, and makes busy station throats something a
-person actually operates rather than something that resolves itself automatically.
+```java
+enum Mode { OPEN, ALLOWLIST, BLOCKLIST }   // 开放 / 白名单 / 黑名单
+Mode mode;                                 // 默认 OPEN
+ObjectOpenHashSet<UUID> players;           // 存 UUID 而非玩家名（玩家会改名）
+boolean opBypass;                          // OP 是否无视名单，默认 true
+```
+
+这样服务器管理员可以把一张大网**切成若干控制区**，分给不同玩家各管一段，
+而不必把整张地图的权限交给任何一个人。
+
+> **一个必须注意的安全细节：** 如果仪表板人人可合成，被拉黑的玩家只要做一个仪表板
+> 就能把自己加回白名单，名单形同虚设。因此仪表板必须在**服务端**做 OP 校验，
+> 而不能只靠隐藏合成配方。
+> 顺带一提，目前整个 `org/mtr/mod` 中找不到任何 `hasPermissionLevel` 调用 ——
+> 这会是本 mod 的第一套玩家权限机制。
+
+#### 二、信号桌（Signal Desk）—— 方块，可坐
+
+一个带屏幕的方块。它有**两种显示状态**：
+
+| 状态 | 显示方式 | 目的 |
+|---|---|---|
+| **无人使用** | 屏幕在**世界中实时渲染**，路过的玩家可以看见 | 控制室有"活着"的感觉；同伴能围观 |
+| **有人坐下** | 打开**可操作的全屏界面** | 真正下达指令 |
+
+世界中渲染这一点，本 mod 已有成熟先例 —— PIDS 就是在方块表面实时绘制的，
+因此技术上是现成的路子，不需要新机制。
+
+坐下后进入的界面，显示该桌子控制区域的**示意式轨道图（schematic track diagram）**，
+包含实时的区段占用、信号灯色、道岔位置。
+
+### 操作方式：标准的 NX 入口-出口法
+
+排进路采用**入口-出口法（entrance–exit，简称 NX）**，
+这正是全世界真实信号工作站使用的标准操作方式：
+
+| 操作 | 效果 |
+|---|---|
+| **左键入口信号机，再左键出口信号机** | 排定进路；沿途道岔**自动扳到位并锁死** |
+| **右键入口信号机** | 取消进路；信号机**转为红灯** |
+| **左键道岔组** | 单独扳动该道岔（若已被进路锁闭，则拒绝并说明原因） |
+| 左键信号机后按 Esc | 放弃这次未完成的入口选择 |
+| 悬停任意对象 | 显示编号、状态、所属进路、锁闭原因 |
+| 滚轮 / 拖拽 | 缩放与平移 |
+
+已选中但尚未完成的入口信号机会**高亮闪烁**，
+让操作员随时知道自己有一次 NX 操作只做了一半。
+
+### 核心行为：进路排错时把列车拦停
+
+这是整个提案最重要的一条，也是目前**完全无法实现**的能力：
+
+> 信号员把进路排去了 B 站台，但这趟车应该走 A 站台。
+> 通往 A 的那条道岔腿被持续封锁，列车预约不到，于是**停在防护信号机前**。
+> 信号员取消进路，重排到 A。封锁解除，信号开放，列车继续走。
+
+**列车具体停在哪里**，由信号桌的「防护模式」决定：
+
+| 模式 | 停车位置 | 说明 |
+|---|---|---|
+| `AREA_ENTRY`（默认） | 整个咽喉区的入口信号机 | 贴近现实：一架信号机防护区内所有道岔 |
+| `AT_POINTS` | 紧贴道岔之前 | 调试与教学时更直观 |
+
+**两种模式都不需要在道岔旁边摆信号机。**
+现实中的铁路也不会在每组道岔旁边立一架信号机 —— 咽喉区入口立一架，
+它防护里面所有的道岔。这一点在技术上是成立的，原因见下文第 2 条发现。
+
+### 这会带来什么
+
+这会给服务器增加一个**全新的可扮演角色**。
+繁忙车站的咽喉区从"自动解决的背景逻辑"变成"需要有人盯着操作的岗位"，
+而且信号员、司机、调度之间会自然产生配合与沟通 ——
+这是目前 MTR 多人玩法里缺失的一块。
 
 ---
 
-## 字段 3 — Assets
+## 字段 3 — Assets（资源）
 
-None. No third-party assets are proposed, so there is no licensing question to resolve.
+**无。不提供任何第三方资源，因此不存在授权问题。**
 
-I am not suggesting any particular look for the new block or item — those are yours to design. The
-control screen, however, is intended to be drawn entirely in code (rectangles, lines and the
-vanilla font, with colours as constants), so it carries no texture dependency and needs no art
-work from your side.
+关于美术资源的分工，提案有一个明确的界线：
+
+| 部分 | 定位 | 由谁负责 |
+|---|---|---|
+| 信号桌方块的模型与贴图 | **占位（placeholder）** | **由你们设计** |
+| 仪表板物品的贴图 | **占位** | **由你们设计** |
+| 方块状态、合成配方、掉落表 | **占位** | **由你们调整** |
+| **信号桌的控制界面** | **最终成品** | 由提案方提供 |
+| 联锁引擎、数据模型、网络包 | **最终成品** | 由提案方提供 |
+| 语言文件 | 成品 | 由提案方提供 |
+
+由这条分工推出一个**硬性技术约束**：
+
+> **控制界面不得依赖任何贴图文件。**
+
+理由很直接：既然美术资源明确划给你们，如果界面用了 `.png`，
+那界面在你们手上就是残缺的。
+因此界面必须**纯代码绘制（procedurally drawn）**：
+
+- 轨道、道岔、信号灯点、进路高亮 —— 全部用矩形与线段绘制原语画出
+- 文字一律使用 Minecraft **原版字体**，不引入自定义字体图集
+- 颜色全部写成**代码常量**，不从资源包读取
+- 唯一允许的外部依赖是**语言文件**，因为那是翻译而不是美术
+
+这样界面**自带完整品相、零外部资源依赖**，合并当天即可使用；
+而方块长什么样，完全由你们决定。
 
 ---
 
-## 字段 4 — Implementation Details and References
+## 字段 4 — Implementation Details and References（实现细节与参考）
 
-I have written a full design document for this. It is in my fork, in Chinese:
+### 完整设计文档
+
+已经写了一份完整的设计方案，在我的 fork 里：
 
 https://github.com/TonyD365/Minecraft-Transit-Railway/blob/master/docs/SIGNAL_SYSTEM_PLAN.md
 
-I am happy to translate it to English if that would help review.
+内容包括数据模型、进路状态机、七项联锁检查、界面配色与画法、安全模型、
+文件规划、分阶段实现顺序，以及 v1 明确不做的部分。
 
-### Why this fits the existing engine
+### 为什么这在现有引擎里做得成
 
-Before designing anything I checked what the simulation core already allows, since the whole
-proposal depends on it. Three findings:
+设计之前先核对了模拟核心到底允许什么，因为整个提案都建立在这之上。三条发现：
 
-**1. Manual rail blocking already exists.** `org.mtr.core.data.Rail` exposes
-`blockRail(LongArrayList)`, and `BlockSignalBase` already calls it via `PacketBlockRails` on a
-redstone input. An interlocking can therefore hold points by blocking the diverging leg — no
-change to the simulation core is needed.
+#### 发现 1：手动封锁轨道的接口已经存在
 
-**2. Stopping points come from rail signal colours, not from signal blocks.** Everything in the
-core that decides whether a train may proceed (`getSignalColors`, `reserveRail`, `isBlocked`) is
-rail-level; `BlockSignalBase` only reads state to pick a lamp aspect. This means a route can hold
-a train at a chosen boundary without requiring a signal block to be placed at every set of points,
-which matches real practice — one home signal protects a whole station throat.
+`org.mtr.core.data.Rail` 已经公开：
 
-**3. `MANUAL_BLOCK_DURATION` is 1000 ms.** A manual block lapses after a second, so locks have to
-be re-issued every tick as a heartbeat. This is the main implementation risk and the thing I would
-validate first. Because a lapsed block makes a rail *passable*, the design additionally drops the
-entrance signal to danger whenever a heartbeat is missed, so the failure mode stays safe.
+```java
+public void blockRail(LongArrayList colors);
+```
 
-### Scope
+而且 `BlockSignalBase` 已经在用它 —— 接到红石信号时通过 `PacketBlockRails` 调用。
 
-The design covers route locking, conflict checking, automatic point calling, **approach locking**
-(cancelling a route in a train's face holds the points for a timed release instead of releasing
-them immediately), **overlap**, **flank protection**, route release, and an OP-only emergency
-release. All validation is server-side; the screen is a renderer and an input device only.
+**含义：** 联锁可以通过封锁道岔的分歧腿来"锁住道岔"，
+**完全不需要改动模拟核心**。
 
-Deliberately left out of a first version, to keep the scope reviewable:
+#### 发现 2：停车点由 rail 的信号色决定，而不是由信号机方块决定
 
-- **Sectional release** — a first version releases the whole route at once, so one train at a time
-  through a throat. The route stores its rails as an ordered list so this can be added later
-  without a data migration.
-- **Automatic route setting (ARS)** — every route is set by hand. Timetable-driven route setting
-  would be a natural follow-on.
-- Swinging overlaps; unusual point layouts (slips, crossings, ladders) may need manual correction
-  from the dashboard.
+核心中一切决定列车能否前进的逻辑，都是 **rail 级别**的：
 
-### References
+```java
+public IntAVLTreeSet getSignalColors();
+private static void reserveRail(...);
+boolean isBlocked(long, Rail$BlockReservation);
+```
 
-- Entry/exit (NX) route setting — https://www.jmri.org/help/en/html/tools/EntryExit.shtml
-- Evolution of signalling control — https://www.railengineer.co.uk/evolution-of-signalling-control/
-- Overlap and flank protection — https://www.railwaysignallingconcepts.in/overlap-flank-protection-railway-signalling/
-- Route locking circuits — https://www.railwaysignallingconcepts.in/route-locking-circuit-railway-signalling/
+而 `BlockSignalBase` 只做两件事 —— 读取状态选灯色、接红石触发封锁：
+
+```java
+public int getActualAspect(boolean occupied, boolean isBackSide)
+public void checkForRedstoneUpdate(...)
+```
+
+**含义：** 进路可以把列车拦停在**任意选定的边界**上，
+而不需要在每组道岔旁边摆一架信号机方块。
+这恰好与现实做法吻合：一架进站信号机防护整个车站咽喉区。
+
+#### 发现 3：`MANUAL_BLOCK_DURATION` 是 1000 毫秒
+
+```java
+private static final int MANUAL_BLOCK_DURATION = 1000;
+```
+
+手动封锁**一秒即过期**，所以锁必须**每 tick 以心跳（heartbeat）形式重新下发**。
+
+这是本提案**最大的实现风险**，也是我会**最先验证**的一步。
+
+另外有一个必须处理的方向性问题：**封锁一旦失效，轨道就变成可通行** ——
+失效方向是危险的。因此设计中额外加了一道保险：
+**只要心跳漏拍，立刻把入口信号机压回红灯**，而不是单纯依赖封锁本身。
+这样失效模式才是**故障导向安全（fail-safe）**的。
+
+### 联锁引擎涵盖的内容
+
+排一条进路要通过**七项检查**，任何一项不过都会**明确说明拒绝原因**（不会静默失败）：
+
+| # | 检查 | 不通过时 |
+|---|---|---|
+| 1 | 寻路：N → X 是否存在通路 | 「无此进路」 |
+| 2 | 权限：沿途信号机与道岔是否都归本桌管辖 | 「非本桌管辖」 |
+| 3 | 冲突：轨道是否已属于另一条进路 | 「进路冲突」 |
+| 4 | 道岔：所需道岔是否被别的进路锁着 | 「道岔已锁闭」 |
+| 5 | 空闲：进路上当前是否有列车 | 「区段占用」 |
+| 6 | 超距：出口之后的安全超距是否空闲 | 「超距不可用」 |
+| 7 | 侧防：侧防道岔能否扳到防护位 | 「侧防不可用」 |
+
+七项全过后：扳道岔 → 锁闭 → 启动心跳封锁 → 开放入口信号机。
+
+引擎还包含以下现实中的安全机制：
+
+- **接近锁闭（approach locking）** —— 如果列车已经凭绿灯在接近，
+  取消进路时信号**立刻转红**，但道岔**继续锁闭**一段延时（默认 120 秒），
+  界面上显示实时倒计时。
+  这是防止「司机已经看到绿灯，你却把他脚下的道岔扳走」。
+  已被列车占用的进路则**完全不能取消**。
+- **安全超距（overlap）** —— 出口信号机之后预留一小段轨道，
+  保证列车少许冒进时仍有受保护的轨道。
+- **侧防（flank protection）** —— 不在进路上、但可能让其他列车侧向冲入的道岔，
+  会被强制扳到背离进路的位置并锁死。
+- **紧急解锁（emergency release）** —— 仅 OP 可用，带确认框，
+  操作连同玩家名写入日志。进路卡死时的逃生出口。
+- **消息日志** —— 每一次排路、取消、拒绝、扳岔、紧急解锁，
+  都带时间戳与操作玩家，显示在界面右下角。
+
+### 安全模型
+
+| 层级 | 校验内容 | 执行位置 |
+|---|---|---|
+| 仪表板物品 | OP（`hasPermissionLevel(2)`） | 服务端 |
+| 坐上信号桌 | 黑白名单 | 服务端 |
+| 任何桌面操作 | 黑白名单**重新校验** + 该桌的授权集合 | 服务端 |
+| 紧急解锁 | OP | 服务端 |
+
+**绝不信任客户端传来的任何数据。**
+界面只是渲染器与输入设备，所有决策都在服务端做出后广播回来。
+黑白名单在**坐下时校验一次，之后每个操作包再校验一次** ——
+因为玩家有可能在已经坐着的时候被移出名单。
+
+### 界面风格
+
+参照香港港铁 OCC / NX 信号工作站的视觉语言重制，依据公开资料，不复制任何代码：
+
+| 元素 | 颜色 |
+|---|---|
+| 背景 | 近黑 `#0A0A0A` |
+| 轨道：空闲且未排进路 | 深灰 `#555555` |
+| 轨道：进路已排 | 白 `#FFFFFF` |
+| 轨道：被列车占用 | 红 `#FF3030` |
+| 轨道：已锁闭但未占用 | 琥珀 `#FFB000` |
+| 信号机：停车 / 注意 / 进行 | 红点 / 黄点 / 绿点 |
+| 已选中的入口信号机 | 闪烁白环 |
+
+轨道图采用**示意式而非地理式**画法：rail 拉直成水平线段，
+道岔处用短 45° 斜线连接 —— 这正是真实控制盘的画法。
+被占用的区段上带一个小方框显示车次编号（**列车标示 train describer**），
+随列车逐区段移动。
+
+### v1 明确不做的部分
+
+为了让首版范围可审阅，以下内容**刻意排除**：
+
+| 不做的内容 | 原因与后续 |
+|---|---|
+| **分段解锁（sectional release）** | 首版整条进路一次性解锁，同时只容一列车通过咽喉区。进路的轨道以**有序列表**存储，将来补上不需要数据迁移。 |
+| **自动排进路（ARS）** | 每条进路都手排。按时刻表自动排路是很自然的后续扩展。 |
+| **浮动超距（swinging overlap）** | 首版超距固定为一条轨道，不随速度变化。 |
+| **复杂道岔布置** | 道岔靠轨道图拓扑自动推断；交分道岔、交叉渡线、梯线可能需要在仪表板里手动修正。 |
+
+另有一条风险需要记录：**模拟核心是预编译的**。
+若将来核心改变 `blockRail` 的语义或那个 1000 毫秒常量，心跳机制必须重新评估。
+
+### 分阶段实现顺序
+
+| 阶段 | 内容 |
+|---|---|
+| 1 | 数据模型、桌子方块、仪表板物品、座椅实体、占位资源 |
+| 2 | **心跳封锁验证** —— 风险最高，故意最先做 |
+| 3 | 仪表板界面：OP 校验、划区域、授权、黑白名单 |
+| 4 | 信号桌界面（静态）：轨道图、信号机、道岔、占用染色 |
+| 5 | 寻路 + 排进路 + 七项检查 + 自动扳道岔 |
+| 6 | 取消进路、接近锁闭、进路解锁、**排错拦停列车** |
+| 7 | 超距、侧防、紧急解锁、消息日志、服务端全面校验 |
+| 8 | 编译、实测、提交 |
+
+第 2 阶段**故意排在第二位**：万一心跳机制撑不住，
+第 5–7 阶段都要换做法，在界面写出来之前发现这件事，代价小得多。
+
+### 参考资料
+
+- 入口-出口（NX）进路控制 — https://www.jmri.org/help/en/html/tools/EntryExit.shtml
+- 信号控制方式的演变 — https://www.railengineer.co.uk/evolution-of-signalling-control/
+- 安全超距与侧防 — https://www.railwaysignallingconcepts.in/overlap-flank-protection-railway-signalling/
+- 进路锁闭电路 — https://www.railwaysignallingconcepts.in/route-locking-circuit-railway-signalling/
+- 进路解锁电路 — https://www.railwaysignallingconcepts.in/railway-route-release-circuits/
+- SACEM 系统 — https://en.wikipedia.org/wiki/SACEM_(railway_system)
+- 港铁 CBTC 信号升级 — https://www.itsinternational.com/news/hong-kongs-mtr-upgrades-signalling-cbtc
