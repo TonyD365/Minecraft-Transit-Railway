@@ -1,7 +1,9 @@
 # 信号桌与联锁系统 — 设计方案
 
 > 状态：设计阶段，尚未实现
-> 目标分支：本 fork 的 `master`。贴图与模型均为占位资源（placeholder），最终资源由上游提供。
+> 目标分支：本 fork 的 `master`。
+> 资源归属：方块与物品的模型、贴图为**占位资源**，由上游自行设计；
+> **信号桌的控制界面是本项目的最终成品，不是占位**，详见 §0.1。
 
 ---
 
@@ -18,6 +20,33 @@
 
 界面是**依据公开资料重制**的港铁 MTR OCC / NX 信号工作站视觉风格。
 本项目为 GPL 授权，不会复制任何第三方代码进来。
+
+### 0.1 资源归属：哪些是占位，哪些是成品
+
+向上游提交 PR 时，两部分的定位**完全不同**：
+
+| 部分 | 定位 | 谁负责 |
+|---|---|---|
+| 信号桌方块的模型与贴图 | **占位（placeholder）** | 上游自行设计 |
+| 仪表板物品的贴图 | **占位** | 上游自行设计 |
+| 方块状态、配方、掉落表 | **占位** | 上游自行调整 |
+| **信号桌的控制界面（§7）** | **最终成品** | 本项目负责，上游直接使用 |
+| 联锁引擎、数据模型、网络包（§2–§5） | **最终成品** | 本项目负责 |
+
+由此得出一条**硬性技术约束**：
+
+> **控制界面不得依赖任何贴图文件。**
+
+因为如果界面用了 `.png` 资源，而那些资源被归类为「上游自己做」，界面就会在上游那边变成残缺状态。
+因此 `SignalDeskScreen` 与 `SignalDeskDiagram` 必须**纯代码绘制（procedurally drawn）**：
+
+* 轨道、道岔、信号灯点、进路高亮 —— 全部用矩形与线段绘制原语（drawing primitive）画出
+* 文字一律使用 Minecraft 原版字体（vanilla font），不引入自定义字体图集
+* 颜色全部写成代码中的常量（§7.1），不从资源包读取
+* 唯一允许的外部依赖是**语言文件**（`en_us` / `zh_cn`），因为那是翻译而不是美术
+
+这样，界面**自带完整品相、零外部资源依赖**，上游合并后即刻可用；
+而方块长什么样，则完全交给他们决定。
 
 ---
 
@@ -410,9 +439,9 @@ entity/
   EntitySignalDeskSeat.java    隐形座椅
 
 screen/
-  SignalDashboardScreen.java   管理界面
-  SignalDeskScreen.java        操作界面（OCC 风格）
-  SignalDeskDiagram.java       轨道示意图渲染器
+  SignalDashboardScreen.java   管理界面                【成品，纯代码绘制】
+  SignalDeskScreen.java        操作界面（OCC 风格）     【成品，纯代码绘制】
+  SignalDeskDiagram.java       轨道示意图渲染器         【成品，纯代码绘制】
 
 packet/
   PacketUpdateSignalDesk.java     仪表板 → 服务端（配置）
@@ -420,12 +449,13 @@ packet/
   PacketSignalDeskState.java      服务端 → 客户端（实时状态广播）
 
 resources/
-  blockstates、models、textures、loot table、配方      【全部占位】
-  语言文件：en_us、zh_cn
+  blockstates、models、textures、loot table、配方      【全部占位，上游自行设计】
+  语言文件：en_us、zh_cn                               【成品】
 ```
 
 每个占位资源都写上 `TODO: placeholder asset — to be replaced upstream`，
 让美术和逻辑可以**分开审阅**，也更容易被上游接受。
+注意界面相关的三个文件**不带这个标记** —— 它们是成品，不需要上游替换（见 §0.1）。
 
 ---
 
