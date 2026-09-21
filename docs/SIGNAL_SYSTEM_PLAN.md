@@ -1,41 +1,39 @@
-# Signal Desk & Interlocking System — Design Plan
+# 信号桌与联锁系统 — 设计方案
 
-> Status: design / not yet implemented
-> Target: this fork (`master`). Assets are placeholders; upstream supplies final models & textures.
-
----
-
-## 0. Scope
-
-Add a prototypical **interlocking (联锁) and signal control system** on top of MTR's existing
-rail + signal-colour mechanics:
-
-1. **Signal Dashboard** (handheld item, OP-only) — administration: define desks, control areas,
-   which signals/points each desk may control, and the desk's player allow/block list.
-2. **Signal Desk** (block + seat) — operation: sit down, get a Hong Kong OCC-style control
-   screen, set and cancel routes, operate points individually.
-3. **Interlocking engine** (server side) — route locking, conflict checking, automatic point
-   setting, approach locking, route release, and holding trains at a signal until the route is
-   correct.
-
-The UI is a **re-creation of the visual style** of a Hong Kong MTR OCC / NX signaller workstation,
-built from public reference material. No third-party code is copied into this GPL project.
+> 状态：设计阶段，尚未实现
+> 目标分支：本 fork 的 `master`。贴图与模型均为占位资源（placeholder），最终资源由上游提供。
 
 ---
 
-## 1. Engine constraints (verified against the code)
+## 0. 范围
 
-These are facts established by reading `libs/Transport-Simulation-Core-0.0.1.jar` and the mod
-source. Everything in this plan is shaped by them.
+在 MTR 现有的「轨道 + 信号色」机制之上，增加一套**贴近现实的联锁系统（interlocking）**：
 
-### 1.1 The simulation core is a pre-compiled black box
+1. **信号仪表板（Signal Dashboard）** — 手持物品，仅 OP 可用。负责管理：新建信号桌、划定控制区域、
+   指定每个桌子可以控制哪些信号机与道岔、设置该桌子的玩家黑白名单。
+2. **信号桌（Signal Desk）** — 方块 + 座椅实体。负责操作：坐下后弹出港铁 OCC 风格的控制界面，
+   排进路、取消进路、单动道岔。
+3. **联锁引擎（interlocking engine）** — 运行在服务端。负责进路锁闭、冲突检查、自动扳道岔、
+   接近锁闭、进路解锁，以及在进路不正确时把列车拦停。
 
-`Transport-Simulation-Core-0.0.1.jar` owns train movement and block reservation. We cannot modify
-it. We can only call its public API.
+界面是**依据公开资料重制**的港铁 MTR OCC / NX 信号工作站视觉风格。
+本项目为 GPL 授权，不会复制任何第三方代码进来。
 
-### 1.2 Train stopping points are defined by rail signal colours, NOT by signal blocks
+---
 
-From `org.mtr.core.data.Rail`:
+## 1. 引擎约束（已对照代码验证）
+
+以下都是阅读 `libs/Transport-Simulation-Core-0.0.1.jar` 与 mod 源码后确认的事实。
+整份方案的形态都是被这几条约束决定的。
+
+### 1.1 模拟核心是预编译的黑盒
+
+`Transport-Simulation-Core-0.0.1.jar` 掌管列车运行与区段预约（block reservation）。
+我们**改不了它**，只能调用它公开的 API。
+
+### 1.2 列车的停车点由 rail 的信号色决定，而不是由信号机方块决定
+
+摘自 `org.mtr.core.data.Rail`：
 
 ```java
 public IntAVLTreeSet getSignalColors();
@@ -45,441 +43,427 @@ private static void reserveRail(...);
 boolean isBlocked(long, Rail$BlockReservation);
 ```
 
-Every one of these is **rail-level**. The core has no concept of a signal *block* in the world.
+这些**全部是 rail 级别的**。核心库里根本没有「世界中的信号机方块」这个概念。
 
-`BlockSignalBase` only:
+而 `BlockSignalBase` 只做两件事：
+
 ```java
-public int getActualAspect(boolean occupied, boolean isBackSide)  // reads state -> lamp colour
-public void checkForRedstoneUpdate(...)                           // redstone -> trigger a block
+public int getActualAspect(boolean occupied, boolean isBackSide)  // 读取状态 → 显示灯色
+public void checkForRedstoneUpdate(...)                           // 接红石 → 触发封锁
 ```
 
-**Consequence:** a train stops at the boundary of a *signal-colour span on the rails*. We choose
-where trains stop by choosing where to paint colour spans. Physical signal blocks are annunciators
-(标示器) only. No signal block is needed at a set of points.
+**结论：** 列车停在**「rail 上信号色区段（colour span）的边界」**。
+我们想让车停在哪里，就把色段边界画在哪里。物理信号机方块只是**标示器（annunciator）**。
+**道岔旁边不需要摆任何信号机。**
 
-### 1.3 Manual blocking expires after 1 second
+### 1.3 手动封锁只维持 1 秒
 
 ```java
-private static final int MANUAL_BLOCK_DURATION = 1000;   // milliseconds
+private static final int MANUAL_BLOCK_DURATION = 1000;   // 毫秒
 private long manualBlockCooldown;
 ```
 
-`blockRail()` holds for **1000 ms only**. To hold points locked for the life of a route, the server
-must **re-issue the block every tick** — a heartbeat (心跳/保活). This is the single largest
-technical risk in the plan and is validated first (Phase 2).
+`blockRail()` **只保持 1000 毫秒**。要让道岔在整条进路存续期间一直锁住，
+服务端必须**每 tick 重新下发一次封锁** —— 也就是**心跳（heartbeat，保活机制）**。
+这是整个方案最大的技术风险，因此放在第 2 阶段最先验证。
 
-### 1.4 There is no player permission system in this mod
+### 1.4 这个 mod 目前没有任何玩家权限系统
 
-No `hasPermissionLevel` check exists anywhere in `org/mtr/mod`. We are adding the first one.
-This creates a bootstrapping hole: if the Dashboard were craftable by anyone, a blocked player
-could simply craft one and re-add themselves. Therefore **the Dashboard is OP-gated server-side**,
-not merely hidden.
+整个 `org/mtr/mod` 里找不到一处 `hasPermissionLevel` 检查。我们是在造**第一套**权限机制。
+
+这带来一个**引导漏洞（bootstrapping hole）**：如果仪表板谁都能合成，
+被拉黑的玩家只要做一个仪表板，就能把自己加回白名单，名单等于白设。
+因此**仪表板必须在服务端做 OP 校验**，而不能只是把配方藏起来。
 
 ---
 
-## 2. Domain model
+## 2. 数据模型
 
 ### 2.1 `SignalDesk` — 信号桌
 
-| Field | Type | Meaning |
+| 字段 | 类型 | 含义 |
 |---|---|---|
-| `id` | `long` | unique |
-| `name` | `String` | shown on the screen header |
-| `areaMin`, `areaMax` | `BlockPos` | the cuboid this desk controls |
-| `controlledSignalIds` | `LongOpenHashSet` | signals the desk may operate |
-| `controlledPointIds` | `LongOpenHashSet` | point groups the desk may operate |
-| `access` | `SignalDeskAccess` | player allow/block list |
-| `protectionMode` | `ProtectionMode` | `AREA_ENTRY` or `AT_POINTS` |
-| `deskBlockPos` | `BlockPos` | the physical desk |
+| `id` | `long` | 唯一编号 |
+| `name` | `String` | 显示在界面顶栏 |
+| `areaMin`, `areaMax` | `BlockPos` | 该桌子控制的长方体区域 |
+| `controlledSignalIds` | `LongOpenHashSet` | 允许操作的信号机 |
+| `controlledPointIds` | `LongOpenHashSet` | 允许操作的道岔组 |
+| `access` | `SignalDeskAccess` | 玩家黑白名单 |
+| `protectionMode` | `ProtectionMode` | `AREA_ENTRY` 或 `AT_POINTS` |
+| `deskBlockPos` | `BlockPos` | 实体桌子的位置 |
 
 ### 2.2 `SignalDeskAccess` — 黑白名单
 
 ```java
-enum Mode { OPEN, ALLOWLIST, BLOCKLIST }
-Mode mode;                                  // default OPEN
-ObjectOpenHashSet<UUID> players;            // UUIDs, never names (players rename)
-boolean opBypass;                           // default true
+enum Mode { OPEN, ALLOWLIST, BLOCKLIST }    // 开放 / 白名单 / 黑名单
+Mode mode;                                  // 默认 OPEN
+ObjectOpenHashSet<UUID> players;            // 存 UUID，绝不存名字（玩家会改名）
+boolean opBypass;                           // OP 是否无视名单，默认 true
 ```
 
-Checked **on sit-down and again on every action packet** — a player may be removed from the list
-while already seated.
+**坐下时校验一次，之后每个操作包再校验一次** —— 玩家有可能在已经坐着的时候被移出名单。
 
 ### 2.3 `Signal` — 逻辑信号机
 
-Anchored to an **existing MTR signal block** placed in the world. Auto-discovered by scanning the
-desk's area; no new block type is needed.
+挂靠在**世界中已有的 MTR 信号机方块**上，扫描桌子区域自动发现，**不需要新增方块类型**。
 
-| Field | Meaning |
+| 字段 | 含义 |
 |---|---|
-| `id` | derived from `BlockPos` |
-| `pos`, `facing` | where it stands, which way it reads |
-| `guardedRailIds` | the rails immediately beyond it |
-| `signalColors` | the colours it owns (from the existing block entity) |
-| `aspect` | current displayed aspect, see §4 |
-| `heldRouteId` | the route currently cleared from this signal, or `null` |
+| `id` | 由 `BlockPos` 推导 |
+| `pos`, `facing` | 位置与朝向 |
+| `guardedRailIds` | 它正前方防护的 rail |
+| `signalColors` | 它持有的信号色（读自现有 block entity） |
+| `aspect` | 当前显示的灯色，见 §4 |
+| `heldRouteId` | 当前由它开放的进路，没有则为 `null` |
 
-Signals are placed at **route boundaries** (station throats, platform ends) — not at points.
+信号机摆在**进路边界**（咽喉区入口、站台端），**不摆在道岔旁**。
 
 ### 2.4 `PointGroup` — 道岔组
 
-Auto-discovered: any rail **node with more than two connections** is a junction.
+自动发现：rail 图中**连接数大于 2 的节点**即为分歧点（junction）。
 
-| Field | Meaning |
+| 字段 | 含义 |
 |---|---|
-| `id` | derived from node `Position` |
-| `nodePos` | the junction |
-| `normalRailId` | 定位 — the straight / main leg |
-| `reverseRailId` | 反位 — the diverging leg |
+| `id` | 由节点 `Position` 推导 |
+| `nodePos` | 分歧点位置 |
+| `normalRailId` | **定位（normal）** —— 直向 / 正线一侧 |
+| `reverseRailId` | **反位（reverse）** —— 侧向 / 分歧一侧 |
 | `currentPosition` | `NORMAL` / `REVERSE` |
-| `lockedByRouteId` | non-null = locked, cannot be moved by hand |
-| `isFlankFor` | routes using it purely as flank protection |
+| `lockedByRouteId` | 非空 = 已锁闭，不能手动扳动 |
+| `isFlankFor` | 仅作为侧防（flank protection）被锁的进路 |
 
-"Moving the points" = choosing which leg stays unblocked. The other leg is held blocked by the
-heartbeat.
+所谓「扳道岔」，实质是**选择哪一条腿不被封锁**，另一条腿由心跳持续封锁。
 
 ### 2.5 `SignalRoute` — 进路
 
-| Field | Meaning |
+| 字段 | 含义 |
 |---|---|
-| `id` | unique |
-| `entranceSignalId` | N — where the train starts |
-| `exitSignalId` | X — where the route ends |
-| `railIds` | every rail in the route, in order |
-| `requiredPoints` | `Map<pointId, NORMAL/REVERSE>` |
-| `overlapRailIds` | safety overrun beyond the exit signal (§5.4) |
-| `flankPointIds` | points locked away from the route (§5.5) |
-| `state` | see §3 |
-| `approachLockTimer` | ms remaining before a cancellation takes effect |
+| `id` | 唯一编号 |
+| `entranceSignalId` | **N（入口）** —— 列车从这里出发 |
+| `exitSignalId` | **X（出口）** —— 进路到此为止 |
+| `railIds` | 进路经过的全部 rail，**按顺序存**（为 v2 分段解锁预留） |
+| `requiredPoints` | `Map<道岔id, NORMAL/REVERSE>` |
+| `overlapRailIds` | 出口信号机之后的**安全超距（overlap）**，见 §5.4 |
+| `flankPointIds` | 侧防道岔，见 §5.5 |
+| `state` | 见 §3 |
+| `approachLockTimer` | 取消进路后的延时解锁倒计时（毫秒） |
 
 ---
 
-## 3. Route state machine — 进路状态机
+## 3. 进路状态机（state machine）
 
 ```
-                  reject (reason shown)
-                 ┌──────────────┐
-                 │              │
-  IDLE ──set──> REQUESTED ──ok──> LOCKED ──train approaches──> APPROACH_LOCKED
-    ^                                │                              │
-    │                                │ cancel (no train near)       │ train passes signal
-    │                                │ = immediate                  v
-    │                                v                          OCCUPIED
-    └────────────── RELEASING <──────┴──────── train clears route ──┘
+                     拒绝（附带原因）
+                   ┌──────────────┐
+                   │              │
+  IDLE ──排进路──> REQUESTED ──通过──> LOCKED ──列车接近──> APPROACH_LOCKED
+    ^                                    │                        │
+    │                                    │ 取消（附近无车）        │ 列车越过信号机
+    │                                    │ = 立即生效              v
+    │                                    v                    OCCUPIED
+    └───────────── RELEASING <───────────┴──── 列车出清进路 ───────┘
 ```
 
-| State | 中文 | Meaning |
+| 状态 | 中文 | 含义 |
 |---|---|---|
-| `IDLE` | 空闲 | nothing set; entrance signal at Danger |
-| `REQUESTED` | 请求中 | checks running (one tick) |
-| `LOCKED` | 已锁闭 | points set & locked, entrance signal cleared |
-| `APPROACH_LOCKED` | 接近锁闭 | a train is approaching on a proceed aspect |
-| `OCCUPIED` | 占用 | train is inside the route |
-| `RELEASING` | 解锁中 | train clear, locks dropping |
+| `IDLE` | 空闲 | 未排进路，入口信号机显示停车 |
+| `REQUESTED` | 请求中 | 正在跑检查（只持续一个 tick） |
+| `LOCKED` | 已锁闭 | 道岔已扳妥并锁死，入口信号机已开放 |
+| `APPROACH_LOCKED` | 接近锁闭 | 已有列车凭进行信号接近 |
+| `OCCUPIED` | 占用 | 列车已进入进路内 |
+| `RELEASING` | 解锁中 | 列车出清，锁正在逐步解除 |
 
 ---
 
-## 4. Signal aspects — 信号显示
+## 4. 信号显示（aspect）
 
-MTR's `getActualAspect` returns `0..3`. Mapping:
+MTR 的 `getActualAspect` 返回 `0..3`，映射如下：
 
-| Value | Aspect | 中文 | Shown when |
+| 值 | 显示 | 中文 | 出现条件 |
 |---|---|---|---|
-| `1` | **Danger** (red) | 停车 | no route set from this signal, or route occupied |
-| `3` | **Caution** (yellow) | 注意 | route set, but the section beyond the exit is occupied |
-| `2` | **Preliminary caution** (double yellow) | 预告注意 | route set, two sections ahead occupied (4-aspect only) |
-| `0` | **Clear** (green) | 进行 | route set and the road ahead is clear |
+| `1` | **Danger**（红） | 停车 | 未排进路，或进路已被占用 |
+| `3` | **Caution**（黄） | 注意 | 已排进路，但出口之后的区段被占用 |
+| `2` | **Preliminary caution**（双黄） | 预告注意 | 前方两个区段被占用（仅四显示信号机） |
+| `0` | **Clear**（绿） | 进行 | 已排进路且前方空闲 |
 
-A signal is only cleared by the interlocking — never directly by the player. The player asks for a
-*route*; the aspect is a consequence.
+信号机**只能由联锁开放，玩家不能直接点亮它**。
+玩家申请的是**一条进路**，灯色只是这条进路的**结果**。
 
 ---
 
-## 5. Interlocking logic — 联锁逻辑
+## 5. 联锁逻辑
 
-Runs server-side, every tick, in `SignalInterlocking.tick()`.
+运行在服务端，每 tick 执行 `SignalInterlocking.tick()`。
 
-### 5.1 Setting a route (NX)
+### 5.1 排进路（NX 入口-出口法）
 
-Player clicks entrance signal N, then exit signal X.
+玩家先点入口信号机 N，再点出口信号机 X。
 
 ```
-1. PATH      find the rail path N -> X. No path -> reject "NO ROUTE".
-2. AUTHORITY every signal and point on the path must be in this desk's
-             controlledSignalIds / controlledPointIds. Otherwise -> reject "NOT CONTROLLED".
-3. CONFLICT  no rail in railIds or overlapRailIds may belong to another
-             non-IDLE route -> reject "CONFLICTING ROUTE".
-4. POINTS    every required point must be free (lockedByRouteId == null)
-             or already locked to the same position -> reject "POINTS LOCKED".
-5. CLEAR     no train may currently occupy railIds -> reject "TRACK OCCUPIED".
-6. OVERLAP   the overlap beyond X must be free -> reject "OVERLAP NOT AVAILABLE".
-7. FLANK     flank points must be movable to their protecting position
-                                                   -> reject "FLANK NOT AVAILABLE".
+1. 寻路 PATH       找 N → X 的 rail 路径。找不到 → 拒绝「无此进路」
+2. 权限 AUTHORITY  路径上每个信号机与道岔都必须在本桌子的授权集合里
+                   → 否则拒绝「非本桌管辖」
+3. 冲突 CONFLICT   railIds 与 overlapRailIds 中任何一条不得属于另一条非空闲进路
+                   → 否则拒绝「进路冲突」
+4. 道岔 POINTS     所需道岔必须未被锁，或已锁在相同位置
+                   → 否则拒绝「道岔已锁闭」
+5. 空闲 CLEAR      railIds 上当前不得有列车 → 否则拒绝「区段占用」
+6. 超距 OVERLAP    X 之后的安全超距必须空闲 → 否则拒绝「超距不可用」
+7. 侧防 FLANK      侧防道岔必须能扳到防护位 → 否则拒绝「侧防不可用」
 
-  -> all pass:
-8. CALL      move every required point (including flank) to position.
-9. LOCK      set lockedByRouteId on every point; state = LOCKED.
-10. BLOCK    start the heartbeat blocking every diverging leg not in the route.
-11. CLEAR SIGNAL  unblock the route's own rails; N shows a proceed aspect (§4).
+  → 七项全过：
+8. 扳岔 CALL       把所有所需道岔（含侧防道岔）扳到位
+9. 锁闭 LOCK       给每个道岔写入 lockedByRouteId；状态置为 LOCKED
+10. 封锁 BLOCK     启动心跳，持续封锁所有不属于本进路的分歧腿
+11. 开放信号        解除本进路 rail 的封锁；N 按 §4 显示进行信号
 ```
 
-Rejections are **not silent** — the reason is written to the desk's message log (§7.5) and the
-attempted route flashes red for ~2 s.
+拒绝**不会静默** —— 原因写入桌面消息栏（§7.5），同时该进路在图上**闪红约 2 秒**。
 
-### 5.2 Cancelling a route — 取消进路
+### 5.2 取消进路
 
-Player right-clicks the entrance signal.
+玩家**右键入口信号机**。
 
-Two cases, matching real practice:
+按现实做法分两种情况：
 
-* **No train approaching** → immediate. Signal to Danger, points unlocked, route `IDLE`.
-* **Train approaching on a proceed aspect** (`APPROACH_LOCKED`) → **approach locking (接近锁闭)**.
-  The signal returns to Danger at once, but the points stay locked for a
-  **timed release** (default 120 s, configurable). This is the real-world protection against
-  pulling the points out from under a driver who has already seen a green.
-  The desk shows a live countdown on the route.
+* **附近无车接近** → **立即取消**。信号转红，道岔解锁，进路回到 `IDLE`。
+* **已有列车凭进行信号接近**（`APPROACH_LOCKED`）→ 触发**接近锁闭（approach locking）**。
+  信号**立刻转红**，但道岔**继续锁闭**一段**延时解锁**时间（默认 120 秒，可配置）。
+  这是现实中防止「司机已经看到绿灯，你却把他脚下的道岔扳走」的保护措施。
+  桌面上会显示**实时倒计时**。
 
-A route already `OCCUPIED` cannot be cancelled at all — only an **Emergency Release** (§6.4) by an
-OP can break it.
+已进入 `OCCUPIED` 的进路**完全不能取消**，只能由 OP 执行**紧急解锁**（§6.4）。
 
-### 5.3 Releasing a route — 进路解锁
+### 5.3 进路解锁
 
-**v1 — route release (整进路解锁).** When the last rail of the route becomes clear of the train,
-every lock drops at once.
+**v1 —— 整进路解锁（route release）。** 列车出清进路最后一条 rail 时，所有锁一次性解除。
 
-**v2 — sectional release (分段解锁).** Locks drop rail-by-rail behind the train, so a following
-train can enter the throat sooner. Not in v1, but `railIds` is stored as an ordered list
-specifically so this can be added without a data migration.
+**v2 —— 分段解锁（sectional release）。** 列车走过一段就解一段，后续列车可以更早进入咽喉区。
+v1 不做，但 `railIds` 特意存成**有序列表**，将来加上去不需要做数据迁移（data migration）。
 
-### 5.4 Overlap — 安全超距
+### 5.4 安全超距（overlap）
 
-A short run of track beyond the exit signal, reserved with the route, so that a train that
-overruns X by a little still has protected track. Default: the next rail beyond X, configurable
-per signal. Locked and released with the route.
+出口信号机之后的一小段轨道，随进路一起预留，保证列车**冒进（overrun）**少许时仍有受保护的轨道。
+默认取 X 之后的第一条 rail，可按信号机单独配置。与进路同时锁闭、同时解锁。
 
-### 5.5 Flank protection — 侧防
+### 5.5 侧防（flank protection）
 
-Points *not on* the route but which could let another train run into its flank are forced to the
-position that leads **away** from the route, and locked there. Catches the classic "another train
-rolls out of a siding into my path" case.
+**不在进路上**、但有可能让其他列车侧向冲入本进路的道岔，
+会被强制扳到**背离进路**的位置并锁死。
+专门用来防那个经典事故：另一列车从侧线溜出来，撞进你的进路。
 
-### 5.6 The heartbeat — 心跳封锁
+### 5.6 心跳封锁
 
 ```java
-// every server tick, for every route in LOCKED / APPROACH_LOCKED / OCCUPIED
+// 每个服务端 tick，遍历所有处于 LOCKED / APPROACH_LOCKED / OCCUPIED 的进路
 for (long railId : route.blockedLegRailIds) {
-    rail.blockRail(route.blockColors);   // expires after 1000 ms, so re-issue
+    rail.blockRail(route.blockColors);   // 1000 毫秒后过期，所以必须重发
 }
 ```
 
-If the server stalls for more than a second the locks lapse and re-apply on the next tick. That is
-fail-safe in the right direction: a lapsed *block* makes a rail passable, so we additionally hold
-the entrance signal at Danger whenever the heartbeat has missed a beat, rather than trusting the
-block alone.
+如果服务器卡顿超过一秒，锁会短暂失效，下一 tick 自动补上。
+但**失效方向是危险的** —— 封锁一旦失效，rail 就变成可通行。
+因此我们额外加一道保险：**只要心跳漏拍，就立刻把入口信号机压回停车（Danger）**，
+而不是单纯依赖封锁本身。这叫**故障导向安全（fail-safe）**。
 
-### 5.7 Holding a train at the wrong route — the behaviour we are after
+### 5.7 进路排错时拦停列车 —— 这正是需求的核心
 
-The originally requested behaviour, restated precisely:
+把原始需求精确重述一遍：
 
-> A route is set to platform B, but the train is booked for platform A.
-> The leg towards A is held blocked by the heartbeat. The train cannot reserve it, so it stops at
-> the boundary of the blocked colour span. The signaller cancels the route and re-sets N -> A.
-> The block lifts, the signal clears, the train proceeds.
+> 进路排去了 B 站台，但这趟车该走 A 站台。
+> 通往 A 的那条腿被心跳封锁着，列车预约不到，于是**停在被封锁色段的边界**。
+> 信号员取消进路，重排 N → A。封锁解除，信号开放，列车继续走。
 
-Where exactly it stops is set by `protectionMode`:
+**具体停在哪里**，由 `protectionMode` 决定：
 
-| Mode | Stops at | Notes |
+| 模式 | 停车位置 | 说明 |
 |---|---|---|
-| `AREA_ENTRY` (default) | the entrance signal to the whole throat | Prototypical. One signal protects many points. No signal is needed at the points themselves. |
-| `AT_POINTS` | immediately before the points | Easier to see while debugging. Still needs no signal block there. |
+| `AREA_ENTRY`（默认） | 整个咽喉区的入口信号机 | 贴近现实。一架信号机防护区内所有道岔，道岔旁无需信号机。 |
+| `AT_POINTS` | 紧贴道岔之前 | 调试时更直观。同样不需要在那里摆信号机方块。 |
 
-Both are the same code — only the position of the painted colour-span boundary differs.
+两者是**同一套代码**，区别只是**把色段边界画在哪里**。
 
 ---
 
-## 6. Operations — 操作方式
+## 6. 操作方式
 
-### 6.1 At the desk (`SignalDeskScreen`)
+### 6.1 信号桌界面（`SignalDeskScreen`）
 
-| Input | Action | 中文 |
+| 操作 | 效果 | 说明 |
 |---|---|---|
-| Left-click signal N, then left-click signal X | Set route N -> X; points move automatically | 排进路 |
-| Right-click entrance signal | Cancel route (immediate, or approach-locked countdown) | 取消进路，信号转红 |
-| Left-click a point group | Toggle NORMAL / REVERSE — refused if locked by a route | 单动道岔 |
-| Left-click a signal, then Esc / right-click empty space | Abandon the pending entrance selection | 撤销选择 |
-| Hover anything | Tooltip: id, state, owning route, lock reason | |
-| Scroll / drag | Zoom and pan the track diagram | |
+| 左键信号机 N，再左键信号机 X | 排进路 N → X，道岔自动扳到位 | 标准 NX 操作 |
+| **右键入口信号机** | 取消进路（立即，或进入接近锁闭倒计时） | 信号转红 |
+| 左键道岔组 | 在定位 / 反位间切换 —— 若已被进路锁闭则拒绝 | 单动道岔 |
+| 左键信号机后按 Esc / 右键空白处 | 放弃这次未完成的入口选择 | 撤销选择 |
+| 悬停任意对象 | 提示框：编号、状态、所属进路、锁闭原因 | |
+| 滚轮 / 拖拽 | 缩放与平移轨道示意图 | |
 
-The pending entrance signal is highlighted so the operator always knows a half-finished NX
-operation is outstanding.
+已选中的入口信号机会**高亮**，让操作员随时知道有一次 NX 操作只做了一半。
 
-### 6.2 At the dashboard (`SignalDashboardScreen`, OP only)
+### 6.2 信号仪表板界面（`SignalDashboardScreen`，仅 OP）
 
-* List / create / delete / rename desks
-* Drag a rectangle on a `WidgetMap` to define the control area
-* Two checkbox lists: signals in the area, point groups in the area — tick to authorise
-* Access panel: mode dropdown (`OPEN` / `ALLOWLIST` / `BLOCKLIST`), player list, add/remove,
-  `opBypass` checkbox
-* `protectionMode` dropdown
-* **Validation warnings**, shown inline:
-  * a point group in the area with no signal protecting any approach to it
-  * two desks whose authorised sets overlap (both could fight over the same points)
-  * a signal authorised but its rails lie outside the area
+* 信号桌的列出 / 新建 / 删除 / 改名
+* 在 `WidgetMap` 上**拖拽矩形**划定控制区域
+* 两个勾选列表：区域内的信号机、区域内的道岔组 —— 打勾即授权
+* 权限面板：模式下拉框（`OPEN` / `ALLOWLIST` / `BLOCKLIST`）、玩家列表、增删按钮、`opBypass` 勾选框
+* `protectionMode` 下拉框
+* **校验警告（validation）**，直接显示在界面里：
+  * 区域内某个道岔组，任何一个接近方向上都没有信号机防护
+  * 两个桌子的授权集合重叠（可能会互相抢同一组道岔）
+  * 某信号机被授权，但它的 rail 在区域之外
 
-### 6.3 Sitting down
+### 6.3 坐下
 
-Right-click the desk → server checks `SignalDeskAccess` → spawns `EntitySignalDeskSeat`, player
-rides it, view snapped towards the screen, then the GUI opens. Standing up, dying, or
-disconnecting removes the seat entity. Access is re-checked on every subsequent action packet.
+右键桌子 → 服务端校验 `SignalDeskAccess` → 生成 `EntitySignalDeskSeat` → 玩家骑上去 →
+视角对准屏幕 → 打开 GUI。
+站起、死亡、掉线都会移除座椅实体。**之后每个操作包都会重新校验权限。**
 
-### 6.4 Emergency release — 紧急解锁
+### 6.4 紧急解锁（emergency release）
 
-OP-only, confirmation dialog, written to the message log with the player's name. Force-drops every
-lock on a route regardless of state. The escape hatch for a desynchronised or stuck route.
+仅 OP 可用，弹确认框，操作连同玩家名字写入消息日志。
+无视状态强行解除一条进路上的所有锁。
+这是进路卡死或状态不同步时的**逃生出口（escape hatch）**。
 
 ---
 
-## 7. The screen — Hong Kong OCC style
+## 7. 界面 —— 港铁 OCC 风格
 
-Re-created in `ScreenExtension`, reusing `WidgetMap` for pan/zoom. Visual language follows a
-Hong Kong MTR OCC / NX signaller workstation.
+用 `ScreenExtension` 重制，缩放平移复用现成的 `WidgetMap`。
+视觉语言参照港铁 MTR OCC / NX 信号工作站。
 
-### 7.1 Palette
+### 7.1 配色
 
-| Element | Colour |
+| 元素 | 颜色 |
 |---|---|
-| Background | near-black `#0A0A0A` |
-| Track, unoccupied & unset | dark grey `#555555` |
-| Track, route set | white `#FFFFFF` |
-| Track, occupied by a train | red `#FF3030` |
-| Track, locked but not yet occupied | amber `#FFB000` |
-| Points, reverse | highlighted leg drawn thicker |
-| Signal at Danger | red dot |
-| Signal at Caution | yellow dot |
-| Signal at Clear | green dot |
-| Selected entrance signal | flashing white ring |
+| 背景 | 近黑 `#0A0A0A` |
+| 轨道：空闲且未排进路 | 深灰 `#555555` |
+| 轨道：进路已排 | 白 `#FFFFFF` |
+| 轨道：被列车占用 | 红 `#FF3030` |
+| 轨道：已锁闭但尚未占用 | 琥珀 `#FFB000` |
+| 道岔：反位 | 该侧腿画粗 |
+| 信号机：停车 | 红点 |
+| 信号机：注意 | 黄点 |
+| 信号机：进行 | 绿点 |
+| 已选中的入口信号机 | 闪烁白环 |
 
-### 7.2 Track diagram
+### 7.2 轨道示意图
 
-Schematic, not geographic: rails are straightened to horizontal runs with short 45° links at
-points, the way a real control diagram is drawn. Point groups render as a stub diverging from the
-main run, with the set leg drawn solid and the unset leg dimmed.
+**示意式（schematic），不是地理式** —— rail 被拉直成水平线段，道岔处用短 45° 斜线连接，
+这正是真实控制盘的画法。
+道岔组画成从正线分出的一条短支线，**已选中的腿画实线，未选中的腿画暗**。
 
-### 7.3 Train describer — 列车标示
+### 7.3 列车标示（train describer）
 
-Occupied sections carry a small box with the train's number / route, following it from section to
-section as it moves. This is what makes the screen feel like the real thing.
+被占用的区段上带一个小方框，写着该车的车次 / 交路编号，**随列车逐区段移动**。
+这是让界面「像真的」的关键细节。
 
-### 7.4 Header
+### 7.4 顶栏
 
-Desk name · controlled area · in-game time · connection state.
+桌子名称 · 控制区域 · 游戏内时间 · 连接状态。
 
-### 7.5 Message log
+### 7.5 消息日志
 
-Bottom-right, scrolling, newest first. Every route set, cancellation, rejection (with reason),
-point movement, and emergency release, timestamped and attributed to a player.
+右下角，滚动显示，最新在上。
+每一次排进路、取消、拒绝（含原因）、扳道岔、紧急解锁，都带**时间戳**和**操作玩家**。
 
-### 7.6 Bottom button bar
+### 7.6 底部按钮栏
 
-`Set Route` · `Cancel Route` · `Individual Points` · `Emergency Release` (OP) · `Zoom to Fit`
-— mirroring the mode buttons on a real workstation, for players who prefer buttons to
-click-sequences.
+`排进路` · `取消进路` · `单动道岔` · `紧急解锁`（OP） · `缩放至全图`
+—— 对应真实工作站上的模式按钮，照顾更习惯按按钮而不是点序列的玩家。
 
 ---
 
-## 8. Security model
+## 8. 安全模型
 
-| Layer | Gate | Enforced where |
+| 层级 | 校验内容 | 在哪里执行 |
 |---|---|---|
-| Dashboard item | OP (`hasPermissionLevel(2)`) | server, in the packet handler |
-| Sitting at a desk | `SignalDeskAccess` | server, in `onUse` |
-| Any desk action | `SignalDeskAccess` **re-checked** + desk's authorised signal/point sets | server, in every action packet |
-| Emergency release | OP | server |
+| 仪表板物品 | OP（`hasPermissionLevel(2)`） | 服务端，包处理器内 |
+| 坐上信号桌 | `SignalDeskAccess` | 服务端，`onUse` 内 |
+| 任何桌面操作 | `SignalDeskAccess` **重新校验** + 桌子的信号/道岔授权集合 | 服务端，每一个操作包内 |
+| 紧急解锁 | OP | 服务端 |
 
-**Nothing is trusted from the client.** The client screen is a renderer and an input device; every
-decision is made server-side and broadcast back.
+**绝不信任客户端传来的任何东西。**
+客户端界面只是一个**渲染器 + 输入设备**，所有决策都在服务端做出，然后广播回来。
 
 ---
 
-## 9. File plan
+## 9. 文件规划
 
 ```
 data/
-  SignalDeskData.java          desk record + NBT/JSON serialisation
-  SignalDeskAccess.java        allow/block list
-  SignalRoute.java             route record + state
-  PointGroup.java              points record
-  SignalRef.java               logical signal wrapper over the existing block entity
-  SignalDeskRegistry.java      world-save persistence, all desks
-  SignalInterlocking.java      the engine: tick, set, cancel, release, heartbeat
-  SignalPathfinder.java        rail-graph search N -> X, collecting points
+  SignalDeskData.java          信号桌记录 + NBT/JSON 序列化
+  SignalDeskAccess.java        黑白名单
+  SignalRoute.java             进路记录 + 状态
+  PointGroup.java              道岔组记录
+  SignalRef.java               逻辑信号机，包装现有 block entity
+  SignalDeskRegistry.java      全部信号桌的存档持久化
+  SignalInterlocking.java      联锁引擎：tick、排路、取消、解锁、心跳
+  SignalPathfinder.java        rail 图寻路 N → X，顺带收集沿途道岔
 
 block/
-  BlockSignalDesk.java         block + block entity   [placeholder model]
+  BlockSignalDesk.java         方块 + block entity      【占位模型】
 
 item/
-  ItemSignalDashboard.java     OP-gated handheld      [placeholder texture]
+  ItemSignalDashboard.java     OP 限定手持物品          【占位贴图】
 
 entity/
-  EntitySignalDeskSeat.java    invisible seat
+  EntitySignalDeskSeat.java    隐形座椅
 
 screen/
-  SignalDashboardScreen.java   admin GUI
-  SignalDeskScreen.java        operator GUI (OCC style)
-  SignalDeskDiagram.java       track diagram renderer
+  SignalDashboardScreen.java   管理界面
+  SignalDeskScreen.java        操作界面（OCC 风格）
+  SignalDeskDiagram.java       轨道示意图渲染器
 
 packet/
-  PacketUpdateSignalDesk.java     dashboard -> server (config)
-  PacketSignalDeskAction.java     desk -> server (set/cancel/toggle/emergency)
-  PacketSignalDeskState.java      server -> desk clients (live state broadcast)
+  PacketUpdateSignalDesk.java     仪表板 → 服务端（配置）
+  PacketSignalDeskAction.java     信号桌 → 服务端（排路/取消/扳岔/紧急解锁）
+  PacketSignalDeskState.java      服务端 → 客户端（实时状态广播）
 
 resources/
-  blockstates, models, textures, loot table, recipe   [all placeholders]
-  lang: en_us, zh_cn
+  blockstates、models、textures、loot table、配方      【全部占位】
+  语言文件：en_us、zh_cn
 ```
 
-Every placeholder asset carries `TODO: placeholder asset — to be replaced upstream`, so the art
-and the logic can be reviewed separately.
+每个占位资源都写上 `TODO: placeholder asset — to be replaced upstream`，
+让美术和逻辑可以**分开审阅**，也更容易被上游接受。
 
 ---
 
-## 10. Build order
+## 10. 实现顺序
 
-| Phase | Deliverable | Validates |
+| 阶段 | 产出 | 验证什么 |
 |---|---|---|
-| 1 | Data model, desk block, dashboard item, seat entity, placeholder assets | Place it, sit on it, stand up cleanly |
-| 2 | **Heartbeat blocking** — hold one rail blocked indefinitely | The 1000 ms expiry is beaten. **Highest risk — done early.** |
-| 3 | Dashboard GUI: OP gate, area selection, signal/point authorisation, allow/block list | Config persists across a restart |
-| 4 | Desk GUI, static: track diagram, signals, points, occupancy colours | The OCC screen exists and is readable |
-| 5 | Pathfinder + route setting + all seven interlocking checks + automatic point calling | Setting a route moves the points and clears the signal |
-| 6 | Cancellation, approach locking countdown, route release, **holding a train for a wrong route** | The core requested behaviour |
-| 7 | Overlap, flank protection, emergency release, message log, full server-side validation | Safety complete |
-| 8 | Compile, in-game test, commit to `master` | Shipped |
+| 1 | 数据模型、桌子方块、仪表板物品、座椅实体、占位资源 | 能放下、能坐上去、能干净地站起来 |
+| 2 | **心跳封锁** —— 让一条 rail 无限期保持封锁 | 1000 毫秒过期被攻克。**风险最高，所以最先做。** |
+| 3 | 仪表板界面：OP 校验、划区域、信号/道岔授权、黑白名单 | 配置重启后仍在 |
+| 4 | 信号桌界面（静态）：轨道图、信号机、道岔、占用染色 | OCC 界面出来了且看得懂 |
+| 5 | 寻路 + 排进路 + 七项联锁检查 + 自动扳道岔 | 排进路能真的扳岔并开放信号 |
+| 6 | 取消进路、接近锁闭倒计时、进路解锁、**排错时拦停列车** | **需求的核心行为** |
+| 7 | 安全超距、侧防、紧急解锁、消息日志、服务端全面校验 | 安全机制补齐 |
+| 8 | 编译、进游戏实测、提交 `master` | 交付 |
 
-Phase 2 is deliberately second: if the heartbeat cannot hold, phases 5–7 need a different
-mechanism, and it is far cheaper to learn that before the GUI exists.
-
----
-
-## 11. Known limitations of v1
-
-* **Route release, not sectional release** — one train per throat at a time. Data is already
-  shaped for the v2 upgrade.
-* **No automatic route setting (ARS)** — every route is set by hand. Timetable-driven automatic
-  route setting is a natural follow-on.
-* **Overlap is a fixed single rail**, not a speed-dependent swinging overlap.
-* **Point detection is inferred** from rail-graph topology; unusual layouts (slips, crossings,
-  ladders) may need manual correction from the dashboard.
-* **The core is a black box** — if a future core release changes `blockRail` semantics or the
-  1000 ms constant, the heartbeat must be revisited.
+第 2 阶段**故意排在第二位**：万一心跳撑不住，第 5–7 阶段都得换机制，
+在界面写出来之前就发现这件事，代价小得多。
 
 ---
 
-## References
+## 11. v1 的已知局限
 
-* Entry/Exit (NX) route setting — <https://www.jmri.org/help/en/html/tools/EntryExit.shtml>
-* Evolution of signalling control — <https://www.railengineer.co.uk/evolution-of-signalling-control/>
-* Overlap & flank protection — <https://www.railwaysignallingconcepts.in/overlap-flank-protection-railway-signalling/>
-* Route locking circuits — <https://www.railwaysignallingconcepts.in/route-locking-circuit-railway-signalling/>
-* Route release circuits — <https://www.railwaysignallingconcepts.in/railway-route-release-circuits/>
-* SACEM — <https://en.wikipedia.org/wiki/SACEM_(railway_system)>
-* MTR CBTC upgrade — <https://www.itsinternational.com/news/hong-kongs-mtr-upgrades-signalling-cbtc>
+* **只做整进路解锁，不做分段解锁** —— 同一时间咽喉区只容一列车。数据结构已为 v2 预留。
+* **没有自动排进路（ARS, Automatic Route Setting）** —— 每条进路都要手排。
+  按时刻表自动排路是很自然的后续扩展。
+* **安全超距固定为一条 rail**，不是随速度变化的**浮动超距（swinging overlap）**。
+* **道岔是靠 rail 图拓扑推断出来的**，复杂布置（交分道岔、交叉渡线、梯线）可能需要在仪表板里手动修正。
+* **核心库是黑盒** —— 若将来核心版本改变 `blockRail` 的语义或那个 1000 毫秒常量，心跳机制必须重新评估。
+
+---
+
+## 参考资料
+
+* 入口-出口（NX）进路控制 — <https://www.jmri.org/help/en/html/tools/EntryExit.shtml>
+* 信号控制方式的演变 — <https://www.railengineer.co.uk/evolution-of-signalling-control/>
+* 安全超距与侧防 — <https://www.railwaysignallingconcepts.in/overlap-flank-protection-railway-signalling/>
+* 进路锁闭电路 — <https://www.railwaysignallingconcepts.in/route-locking-circuit-railway-signalling/>
+* 进路解锁电路 — <https://www.railwaysignallingconcepts.in/railway-route-release-circuits/>
+* SACEM 系统 — <https://en.wikipedia.org/wiki/SACEM_(railway_system)>
+* 港铁 CBTC 信号升级 — <https://www.itsinternational.com/news/hong-kongs-mtr-upgrades-signalling-cbtc>
